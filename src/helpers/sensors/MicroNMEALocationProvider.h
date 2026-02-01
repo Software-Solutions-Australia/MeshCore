@@ -33,12 +33,8 @@
     #endif
 #endif
 
-#ifdef PIN_USER_LED
-    #define HAS_USER_LED
-#endif
-
-
 class MicroNMEALocationProvider : public LocationProvider {
+private:
     char _nmeaBuffer[100];
     MicroNMEA nmea;
     mesh::RTCClock* _clock;
@@ -46,42 +42,62 @@ class MicroNMEALocationProvider : public LocationProvider {
     RefCountedDigitalPin* _peripher_power;
     int _pin_reset;
     int _pin_en;
+
     long next_check = 0;
     long time_valid = 0;
 
-    #ifdef PIN_USER_LED
-        bool _led_on = false;
-        unsigned long _led_last_toggle = 0;
-    #endif
+#ifdef PIN_USER_LED
+    enum GpsLedState {
+        LED_OFF,
+        LED_SEARCH,
+        LED_FIX
+    };
 
+    GpsLedState _ledState = LED_OFF;
+    unsigned long _ledLastToggle = 0;
+    bool _ledOutput = false;
 
-public :
-    #ifdef PIN_USER_LED
-        void ledOn() {
-            digitalWrite(PIN_USER_LED, HIGH);
-            _led_on = true;
-        }
-
-        void ledOff() {
+    void updateGpsLed() {
+        if (_ledState == LED_OFF) {
             digitalWrite(PIN_USER_LED, LOW);
-            _led_on = false;
+            return;
         }
 
-        void ledBlink(unsigned long interval_ms) {
-            if (millis() - _led_last_toggle >= interval_ms) {
-                _led_last_toggle = millis();
-                _led_on = !_led_on;
-                digitalWrite(PIN_USER_LED, _led_on ? HIGH : LOW);
-            }
+        if (_ledState == LED_FIX) {
+            digitalWrite(PIN_USER_LED, HIGH);
+            return;
         }
-    #endif
 
-    MicroNMEALocationProvider(Stream& ser, mesh::RTCClock* clock = NULL, int pin_reset = GPS_RESET, int pin_en = GPS_EN,RefCountedDigitalPin* peripher_power=NULL) :
-    _gps_serial(&ser), nmea(_nmeaBuffer, sizeof(_nmeaBuffer)), _pin_reset(pin_reset), _pin_en(pin_en), _clock(clock), _peripher_power(peripher_power) {
+        // SEARCH: blink
+        unsigned long now = millis();
+        if (now - _ledLastToggle >= 500) {
+            _ledLastToggle = now;
+            _ledOutput = !_ledOutput;
+            digitalWrite(PIN_USER_LED, _ledOutput ? HIGH : LOW);
+        }
+    }
+#endif
+
+public:
+    MicroNMEALocationProvider(
+        Stream& ser,
+        mesh::RTCClock* clock = NULL,
+        int pin_reset = GPS_RESET,
+        int pin_en = GPS_EN,
+        RefCountedDigitalPin* peripher_power = NULL
+    ) :
+        _gps_serial(&ser),
+        nmea(_nmeaBuffer, sizeof(_nmeaBuffer)),
+        _pin_reset(pin_reset),
+        _pin_en(pin_en),
+        _clock(clock),
+        _peripher_power(peripher_power)
+    {
         if (_pin_reset != -1) {
             pinMode(_pin_reset, OUTPUT);
             digitalWrite(_pin_reset, GPS_RESET_FORCE);
         }
+
         if (_pin_en != -1) {
             pinMode(_pin_en, OUTPUT);
             digitalWrite(_pin_en, LOW);
@@ -89,19 +105,23 @@ public :
     }
 
     void begin() override {
-        if (_peripher_power) _peripher_power->claim();
+        if (_peripher_power) {
+            _peripher_power->claim();
+        }
 
         if (_pin_en != -1) {
             digitalWrite(_pin_en, PIN_GPS_EN_ACTIVE);
         }
 
-    #ifdef HAS_USER_LED
-        digitalWrite(PIN_USER_LED, HIGH);
-    #endif
-
-    if (_pin_reset != -1) {
-        digitalWrite(_pin_reset, !GPS_RESET_FORCE);
+        if (_pin_reset != -1) {
+            digitalWrite(_pin_reset, !GPS_RESET_FORCE);
         }
+
+#ifdef PIN_USER_LED
+        pinMode(PIN_USER_LED, OUTPUT);
+        digitalWrite(PIN_USER_LED, LOW);
+        _ledState = LED_SEARCH;
+#endif
     }
 
     void reset() override {
@@ -117,66 +137,94 @@ public :
             digitalWrite(_pin_en, !PIN_GPS_EN_ACTIVE);
         }
 
-    #ifdef HAS_USER_LED
+#ifdef PIN_USER_LED
+        _ledState = LED_OFF;
         digitalWrite(PIN_USER_LED, LOW);
-    #endif
+#endif
 
-        if (_peripher_power) _peripher_power->release();  
-    }
-
-    bool isEnabled() override {
-        // directly read the enable pin if present as gps can be
-        // activated/deactivated outside of here ...
-        if (_pin_en != -1) {
-            return digitalRead(_pin_en) == PIN_GPS_EN_ACTIVE;
-        } else {
-            return true; // no enable so must be active
+        if (_peripher_power) {
+            _peripher_power->release();
         }
     }
 
-    void syncTime() override { nmea.clear(); LocationProvider::syncTime(); }
+    bool isEnabled() override {
+        if (_pin_en != -1) {
+            return digitalRead(_pin_en) == PIN_GPS_EN_ACTIVE;
+        }
+        return true;
+    }
+
+    void syncTime() override {
+        nmea.clear();
+        LocationProvider::syncTime();
+    }
+
     long getLatitude() override { return nmea.getLatitude(); }
     long getLongitude() override { return nmea.getLongitude(); }
-    long getAltitude() override { 
+
+    long getAltitude() override {
         long alt = 0;
         nmea.getAltitude(alt);
         return alt;
     }
+
     long satellitesCount() override { return nmea.getNumSatellites(); }
     bool isValid() override { return nmea.isValid(); }
 
-    long getTimestamp() override { 
-        DateTime dt(nmea.getYear(), nmea.getMonth(),nmea.getDay(),nmea.getHour(),nmea.getMinute(),nmea.getSecond());
+    long getTimestamp() override {
+        DateTime dt(
+            nmea.getYear(),
+            nmea.getMonth(),
+            nmea.getDay(),
+            nmea.getHour(),
+            nmea.getMinute(),
+            nmea.getSecond()
+        );
         return dt.unixtime();
-    } 
+    }
 
-    void sendSentence(const char *sentence) override {
+    void sendSentence(const char* sentence) override {
         nmea.sendSentence(*_gps_serial, sentence);
     }
 
     void loop() override {
-
         while (_gps_serial->available()) {
             char c = _gps_serial->read();
-            #ifdef GPS_NMEA_DEBUG
+#ifdef GPS_NMEA_DEBUG
             Serial.print(c);
-            #endif
+#endif
             nmea.process(c);
         }
 
-        if (!isValid()) time_valid = 0;
+        if (!isValid()) {
+            time_valid = 0;
+        }
 
         if (millis() > next_check) {
             next_check = millis() + 1000;
+
             if (_time_sync_needed && time_valid > 2) {
                 if (_clock != NULL) {
                     _clock->setCurrentTime(getTimestamp());
                     _time_sync_needed = false;
                 }
             }
+
             if (isValid()) {
-                time_valid ++;
+                time_valid++;
             }
         }
+
+#ifdef PIN_USER_LED
+        if (!isEnabled()) {
+            _ledState = LED_OFF;
+        } else if (isValid()) {
+            _ledState = LED_FIX;
+        } else {
+            _ledState = LED_SEARCH;
+        }
+
+        updateGpsLed();
+#endif
     }
 };
