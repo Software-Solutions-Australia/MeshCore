@@ -26,7 +26,7 @@
 #define LED_RED                 (PINS_COUNT)
 #define LED_GREEN               (12)
 #define LED_BLUE                (11)
-#define LED_WHITE               (15)
+// #define LED_WHITE               (15) // It seems that the pin is NOT 15 - Need to look into this! 
 
 #define LED_STATE_ON            (1)     // State when LED is litted
 
